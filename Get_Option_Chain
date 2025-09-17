@@ -1,0 +1,32 @@
+from ib_insync import IB, Stock
+
+def fetch_option_chain(symbol: str):
+    ib = IB()
+    ib.connect('127.0.0.1', 7497, clientId=1)
+
+    # 1) Definer underliggende aktie
+    stock = Stock(symbol, 'SMART', 'USD')
+
+    # 2) Få conId (kræves for reqSecDefOptParams)
+    details = ib.reqContractDetails(stock)
+    if not details:
+        print(f"⚠️ Ingen kontraktdetaljer fundet for {symbol}")
+        return
+    conId = details[0].contract.conId
+
+    # 3) Hent option chain
+    params = ib.reqSecDefOptParams(symbol, '', 'STK', conId)
+
+    for p in params:
+        print("Exchange:", p.exchange)
+        print("TradingClass:", p.tradingClass)
+        print("Multiplier:", p.multiplier)
+        print("Expirations (eksempel):", sorted(list(p.expirations))[:5], "...")
+        print("Strikes (eksempel):", sorted(list(p.strikes))[:10], "...")
+        print("-" * 60)
+
+    ib.disconnect()
+
+
+if __name__ == "__main__":
+    fetch_option_chain("AAPL")
