@@ -9,7 +9,7 @@ def fetch_option_chain(symbol: str):
 
     # 2) Få conId (kræves for reqSecDefOptParams)
     details = ib.reqContractDetails(stock)
-    if not details:
+    if not details or not details[0].contract:
         print(f"⚠️ Ingen kontraktdetaljer fundet for {symbol}")
         return
     conId = details[0].contract.conId
