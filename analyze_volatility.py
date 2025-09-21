@@ -1,8 +1,21 @@
-from helpers import connect_ib, disconnect_ib, ib
-from ib_insync import Stock, Option, util
+from ib_insync import IB, Stock, Option, util
 import pandas as pd
 import numpy as np
 import datetime as dt
+
+# ========= Opret IB-forbindelse =========
+ib = IB()
+
+def connect_ib():
+    if not ib.isConnected():
+        ib.connect('127.0.0.1', 7497, clientId=1)
+        ib.reqMarketDataType(3)  # 3 = delayed (brug 1 for real-time hvis du har data)
+        print("✅ Forbundet til IBKR.")
+
+def disconnect_ib():
+    if ib.isConnected():
+        ib.disconnect()
+        print("🔌 Forbindelse afbrudt.")
 
 # === Helper: find næste fredag ≥ en given dato ===
 def get_next_friday(start_date: dt.date) -> dt.date:
@@ -12,16 +25,17 @@ def get_next_friday(start_date: dt.date) -> dt.date:
     return start_date + dt.timedelta(days=days_ahead)
 
 def get_volatility_with_iv(ticker: str, exchange: str = "SMART", currency: str = "USD"):
-    # Forbind til IBKR
     connect_ib()
-    print("Connected: True")
 
     # === Hent aktiekontrakt og seneste pris ===
     contract = Stock(ticker, exchange, currency)
+    contract = ib.qualifyContracts(contract)[0]
+
     market_price_data = ib.reqMktData(contract, snapshot=True)
     ib.sleep(2)
     try:
         last_price = float(market_price_data.last)
+        print(f"📊 Spotpris for {ticker}: {last_price}")
     except (TypeError, ValueError):
         print(f"⚠️ Kunne ikke hente aktuel pris for {ticker}.")
         disconnect_ib()
@@ -73,9 +87,7 @@ def get_volatility_with_iv(ticker: str, exchange: str = "SMART", currency: str =
         print(f"⚠️ Ingen IV returneret for {ticker} (expiry {expiry}). "
               f"Tjek om du har det rigtige options data abonnement.")
 
-    # Afbryd forbindelsen
     disconnect_ib()
-    print("Disconnected.")
 
 if __name__ == "__main__":
     ticker = input("Indtast ticker (fx AAPL, NVDA, NVO): ").strip().upper()

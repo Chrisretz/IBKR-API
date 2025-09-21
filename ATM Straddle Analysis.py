@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import datetime as dt
 
 # ========= INPUT =========
-TICKER = "INTC"
+TICKER = "AAPL"
 USE_DELAYED = True   # True = delayed (3), False = real-time (1)
 
 # ========= CONNECT =========
@@ -27,8 +27,7 @@ print(f"Spotpris for {TICKER}: {spot:.2f}")
 
 # ========= 2) OPTION CHAIN & EXPIRY VALG =========
 chains = ib.reqSecDefOptParams(stock.symbol, "", stock.secType, stock.conId)
-
-# Prøv SMART først; ellers brug første tilgængelige
+# Brug SMART hvis muligt
 chain = next((c for c in chains if c.exchange == "SMART"), chains[0])
 all_exchanges = [chain.exchange] + [c.exchange for c in chains if c.exchange != chain.exchange]
 
@@ -56,13 +55,14 @@ print(f"\nValgt expiry: {expiry}")
 # ========= 3) HENT STRIKES FOR VALGT EXPIRY (uden Error 200 spam) =========
 def strikes_for_expiry(symbol: str, expiry_yyyymmdd: str, exchanges: list[str]):
     """
-    Returner (exchange, sorted_strikes) for den første børs, hvor der findes kontraktdata
-    for den ønskede expiry. Vi bruger strike=0.0 og right='C'/'P' for at få hele kæden.
+    Returner (exchange, sorted_strikes) for første børs med data for expiry.
+    Vi bruger strike=0.0 og right='C'/'P' for at få hele kæden i ét kald.
     """
     for ex in exchanges:
         calls = ib.reqContractDetails(Option(symbol, expiry_yyyymmdd, 0.0, "C", ex))
         puts  = ib.reqContractDetails(Option(symbol, expiry_yyyymmdd, 0.0, "P", ex))
-        strikes = sorted({cd.contract.strike for cd in (calls + puts) if cd.contract.strike and cd.contract.strike > 0})
+        strikes = sorted({cd.contract.strike for cd in (calls + puts)
+                          if cd.contract.strike and cd.contract.strike > 0})
         if strikes:
             return ex, strikes
     return None, []
@@ -71,7 +71,8 @@ exch, expiry_strikes = strikes_for_expiry(TICKER, expiry, all_exchanges)
 if not expiry_strikes:
     raise ValueError(f"Ingen strikes fundet for {TICKER} {expiry} på nogen exchange ({', '.join(all_exchanges)})")
 print(f"Bruger exchange: {exch}")
-# Vælg ATM-Strike ud fra de STRIKES som faktisk findes på netop denne expiry:
+
+# Vælg ATM strike blandt reelle strikes
 atm_strike = min(expiry_strikes, key=lambda s: abs(s - spot))
 print(f"Valgt ATM strike (for {expiry}): {atm_strike}")
 
@@ -91,6 +92,7 @@ if not gc or not gp:
 call_price = tick_call.last if tick_call.last else gc.optPrice
 put_price  = tick_put.last  if tick_put.last  else gp.optPrice
 
+# ========= 5) TABELLEN =========
 df_opts = pd.DataFrame([
     {"Type": "CALL", "Underlying": TICKER, "Spot": spot, "Expiry": expiry,
      "Strike": atm_strike, "Delta": gc.delta, "Gamma": gc.gamma, "Vega": gc.vega,
@@ -102,15 +104,16 @@ df_opts = pd.DataFrame([
 print("\n=== ATM Call & Put (Greeks + IV) ===")
 print(df_opts)
 
-# ========= 5) STRADDLE METRICS =========
+# ========= 6) STRADDLE-METRICS =========
 straddle_price = call_price + put_price
 straddle_pct   = straddle_price / spot
 breakeven_up   = spot + straddle_price
 breakeven_dn   = spot - straddle_price
 
 expiry_date    = dt.datetime.strptime(expiry, "%Y%m%d").date()
-days_to_expiry = max((expiry_date - today).days, 1)  # beskyt mod 0
+days_to_expiry = max((expiry_date - today).days, 1)
 
+# Vega-vægtet kombineret IV
 combined_iv = (
     (gc.impliedVol * gc.vega + gp.impliedVol * gp.vega) / (gc.vega + gp.vega)
     if (gc.vega + gp.vega) != 0 else (gc.impliedVol + gp.impliedVol) / 2
@@ -137,7 +140,7 @@ summary = pd.DataFrame([{
 print("\n=== ATM Straddle Summary ===")
 print(summary)
 
-# ========= 6) P&L PLOT =========
+# ========= 7) P&L PLOT =========
 price_range = np.linspace(spot * 0.85, spot * 1.15, 200)
 call_payoff = np.maximum(price_range - atm_strike, 0)
 put_payoff  = np.maximum(atm_strike - price_range, 0)
