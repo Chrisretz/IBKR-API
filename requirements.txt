@@ -21,3 +21,4 @@ tzdata
 wheel
 yfinance
 streamlit
+plotly
