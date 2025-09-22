@@ -7,7 +7,7 @@ import datetime as dt
 from scipy.interpolate import griddata
 
 # ----- 1) Vælg ticker -----
-ticker_symbol = "TSLA"   # <-- ændr ticker her
+ticker_symbol = "NVDA"   # <-- ændr ticker her
 ticker = yf.Ticker(ticker_symbol)
 
 spot = float(ticker.history(period="1d")["Close"].iloc[-1])
