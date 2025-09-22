@@ -5,6 +5,7 @@ import numpy as np
 import datetime as dt
 from scipy.interpolate import griddata
 import plotly.graph_objects as go
+from yahooquery import search
 
 # ========== LAYOUT & STYLING ==========
 st.set_page_config(page_title="Finansielt Dashboard", layout="wide")
@@ -23,80 +24,49 @@ st.markdown("""
 
 st.title("📊 Finansielt Dashboard")
 
-# ========== KURSDATA ==========
-ticker = st.text_input("Indtast et ticker-symbol", value="AAPL")
-period = st.selectbox("Vælg periode", ["1d", "5d", "1mo", "6mo", "1y", "5y", "max"], index=4)
+# ========== SØGEFUNKTION ==========
+st.subheader("🔍 Søg efter en aktie")
 
-if ticker:
+def search_tickers(query):
+    try:
+        result = search(query)
+        if "quotes" in result:
+            return [f"{item['symbol']} – {item.get('shortname', '')}" for item in result["quotes"]]
+    except Exception as e:
+        st.error(f"Fejl ved søgning: {e}")
+    return []
+
+search_input = st.text_input("Indtast selskabsnavn eller ticker", placeholder="F.eks. Apple, Tesla, NVDA")
+
+ticker = None
+if search_input:
+    matches = search_tickers(search_input)
+    if matches:
+        selected = st.selectbox("Vælg en aktie fra listen", matches)
+        ticker = selected.split(" – ")[0]
+    else:
+        st.warning("Ingen resultater fundet. Prøv et andet søgeord.")
+
+
+# ========== CACHED DATAFUNKTIONS ==========
+@st.cache_data(ttl=300)
+def get_stock_data(ticker, period):
     data = yf.download(ticker, period=period)
-
-    # Fjern MultiIndex hvis det findes
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.droplevel(1)
+    return data
 
-    if not data.empty:
-        st.subheader(f"Aktiekurs for {ticker}")
-        data["SMA50"] = data["Close"].rolling(50).mean()
-        data["SMA200"] = data["Close"].rolling(200).mean()
-
-        show_volume = st.checkbox("Vis volumen på grafen", value=True)
-
-        # Plotly-figur med sekundær y-akse
-        fig_price = go.Figure()
-
-        # Pris + SMA
-        fig_price.add_trace(go.Scatter(
-            x=data.index, y=data["Close"],
-            mode='lines', name='Close', line=dict(color='blue')
-        ))
-        fig_price.add_trace(go.Scatter(
-            x=data.index, y=data["SMA50"],
-            mode='lines', name='SMA50', line=dict(color='orange', dash='dash')
-        ))
-        fig_price.add_trace(go.Scatter(
-            x=data.index, y=data["SMA200"],
-            mode='lines', name='SMA200', line=dict(color='green', dash='dot')
-        ))
-
-        if show_volume:
-            fig_price.add_trace(go.Bar(
-                x=data.index, y=data["Volume"],
-                name='Volume', marker_color='rgba(150,150,150,0.4)',
-                yaxis='y2'
-            ))
-
-        fig_price.update_layout(
-            title="Pris + SMA" + (" + Volume" if show_volume else ""),
-            xaxis=dict(title="Dato"),
-            yaxis=dict(title="Pris"),
-            yaxis2=dict(
-                title="Volumen",
-                overlaying='y',
-                side='right',
-                showgrid=False
-            ),
-            bargap=0,
-            height=500,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-
-        st.plotly_chart(fig_price, use_container_width=True)
-
-        if st.checkbox("Vis rådata"):
-            st.dataframe(data.tail())
-
-# ========== VOLATILITY SURFACE ==========
-st.markdown("---")
-st.subheader("📈 Volatility Surface")
-
-show_surface = st.checkbox("Beregn og vis volatility surface", value=False)
-
-if show_surface and ticker:
+@st.cache_data(ttl=300)
+def get_spot_and_expiries(ticker):
     ticker_obj = yf.Ticker(ticker)
     spot = float(ticker_obj.history(period="1d")["Close"].iloc[-1])
     expiries = ticker_obj.options
+    return spot, expiries
 
+@st.cache_data(ttl=300)
+def build_vol_surface_df(ticker, spot, expiries):
     rows = []
+    ticker_obj = yf.Ticker(ticker)
     for expiry in expiries:
         try:
             chain = ticker_obj.option_chain(expiry)
@@ -144,8 +114,70 @@ if show_surface and ticker:
             continue
 
     if rows:
-        df = pd.concat(rows, ignore_index=True)
+        return pd.concat(rows, ignore_index=True)
+    return pd.DataFrame()
 
+
+# ========== KURSDATA ==========
+if ticker:
+    period = st.selectbox("Vælg periode", ["1d", "5d", "1mo", "6mo", "1y", "5y", "max"], index=4)
+    data = get_stock_data(ticker, period)
+
+    if not data.empty:
+        st.subheader(f"Aktiekurs for {ticker}")
+        data["SMA50"] = data["Close"].rolling(50).mean()
+        data["SMA200"] = data["Close"].rolling(200).mean()
+
+        show_volume = st.checkbox("Vis volumen på grafen", value=True)
+
+        fig_price = go.Figure()
+        fig_price.add_trace(go.Scatter(x=data.index, y=data["Close"], mode='lines', name='Close', line=dict(color='blue')))
+        fig_price.add_trace(go.Scatter(x=data.index, y=data["SMA50"], mode='lines', name='SMA50', line=dict(color='orange', dash='dash')))
+        fig_price.add_trace(go.Scatter(x=data.index, y=data["SMA200"], mode='lines', name='SMA200', line=dict(color='green', dash='dot')))
+
+        if show_volume:
+            fig_price.add_trace(go.Bar(x=data.index, y=data["Volume"], name='Volume', marker_color='rgba(150,150,150,0.4)', yaxis='y2'))
+
+        fig_price.update_layout(
+            title="Pris + SMA" + (" + Volume" if show_volume else ""),
+            xaxis=dict(title="Dato"),
+            yaxis=dict(title="Pris"),
+            yaxis2=dict(
+                title="Volumen",
+                overlaying='y',
+                side='right',
+                showgrid=False
+            ),
+            bargap=0,
+            height=500,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+
+        st.plotly_chart(fig_price, use_container_width=True)
+
+        if st.checkbox("Vis rådata"):
+            st.dataframe(data.tail())
+
+
+# ========== VOLATILITY SURFACE ==========
+st.markdown("---")
+st.subheader("📈 Volatility Surface")
+show_surface = st.checkbox("Beregn og vis volatility surface", value=False)
+
+if show_surface:
+    spot, expiries = get_spot_and_expiries(ticker)
+
+    # Mulighed for at tvinge genberegning (ignorer cache)
+    force_refresh = st.button("🔄 Opdater vol surface-data")
+    if force_refresh:
+        st.cache_data.clear()  # Tømmer al cache
+
+    with st.spinner("⏳ Beregner volatility surface..."):
+        df = build_vol_surface_df(ticker, spot, expiries)
+
+    if df.empty:
+        st.warning("Kunne ikke beregne volatility surface (for lidt data).")
+    else:
         x_lin = np.linspace(df['x'].min(), df['x'].max(), 80)
         T_lin = np.linspace(df['T'].min(), df['T'].max(), 60)
         X, Y = np.meshgrid(x_lin, T_lin)
@@ -156,18 +188,11 @@ if show_surface and ticker:
 
         strikes_grid = spot * np.exp(X)
 
-        # Lav to kolonner ved siden af hinanden
         col1, col2 = st.columns(2)
 
         with col1:
             fig3d = go.Figure()
-            fig3d.add_trace(go.Surface(
-                x=strikes_grid,
-                y=Y,
-                z=Z,
-                colorscale='Viridis',
-                showscale=True
-            ))
+            fig3d.add_trace(go.Surface(x=strikes_grid, y=Y, z=Z, colorscale='Viridis', showscale=True))
             fig3d.add_trace(go.Scatter3d(
                 x=[spot] * len(T_lin),
                 y=T_lin,
@@ -184,18 +209,14 @@ if show_surface and ticker:
                     zaxis_title='Implied Volatility',
                     aspectmode='cube'
                 ),
-                scene_camera=dict(
-                    eye=dict(x=-1.5, y=-1.5, z=1.2)
-                ),
+                scene_camera=dict(eye=dict(x=-1.5, y=-1.5, z=1.2)),
                 height=700
             )
             st.plotly_chart(fig3d, use_container_width=True)
 
         with col2:
             fig2d = go.Figure(data=go.Contour(
-                x=strikes_grid[0],
-                y=T_lin,
-                z=Z,
+                x=strikes_grid[0], y=T_lin, z=Z,
                 colorscale='Viridis',
                 contours=dict(showlabels=True)
             ))
@@ -208,5 +229,3 @@ if show_surface and ticker:
             )
             st.plotly_chart(fig2d, use_container_width=True)
 
-    else:
-        st.warning("Kunne ikke beregne volatility surface (for lidt data).")
