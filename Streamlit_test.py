@@ -10,7 +10,6 @@ from yahooquery import search
 # ========== LAYOUT & STYLING ==========
 st.set_page_config(page_title="Finansielt Dashboard", layout="wide")
 
-# Custom CSS til marginer/padding
 st.markdown("""
 <style>
 .block-container {
@@ -47,24 +46,25 @@ if search_input:
     else:
         st.warning("Ingen resultater fundet. Prøv et andet søgeord.")
 
-
 # ========== CACHED DATAFUNKTIONS ==========
 @st.cache_data(ttl=300)
 def get_stock_data(ticker, period):
     data = yf.download(ticker, period=period)
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.droplevel(1)
-    return data
+    timestamp = dt.datetime.now()
+    return data, timestamp
 
 @st.cache_data(ttl=300)
 def get_spot_and_expiries(ticker):
     ticker_obj = yf.Ticker(ticker)
     spot = float(ticker_obj.history(period="1d")["Close"].iloc[-1])
     expiries = ticker_obj.options
-    return spot, expiries
+    timestamp = dt.datetime.now()
+    return spot, expiries, timestamp
 
 @st.cache_data(ttl=300)
-def build_vol_surface_df(ticker, spot, expiries):
+def build_vol_surface_df(ticker, spot, expiries, show_debug=False):
     rows = []
     ticker_obj = yf.Ticker(ticker)
     for expiry in expiries:
@@ -84,6 +84,12 @@ def build_vol_surface_df(ticker, spot, expiries):
                 on='strike', how='inner', suffixes=('_call', '_put')
             )
 
+            if show_debug:
+                st.write(f"📅 {expiry}: Rækker før filter: {len(m)}")
+
+            if m.empty:
+                continue
+
             atm_strike = m.loc[(m['strike'] - spot).abs().idxmin(), 'strike']
             m['iv_final'] = np.nan
             m.loc[m['strike'] < spot, 'iv_final'] = m.loc[m['strike'] < spot, 'impliedVolatility_put']
@@ -94,13 +100,21 @@ def build_vol_surface_df(ticker, spot, expiries):
 
             atm_iv = m.loc[m['strike'] == atm_strike, 'iv_final'].iloc[0]
             sigma_exp = atm_iv * np.sqrt(T)
-            lower = spot * (1 - 2 * sigma_exp)
-            upper = spot * (1 + 2 * sigma_exp)
+
+            lower = spot * (1 - 3 * sigma_exp)
+            upper = spot * (1 + 3 * sigma_exp)
+            if (upper - lower) < 0.2 * spot:
+                lower = spot * 0.8
+                upper = spot * 1.2
 
             m = m[(m['strike'] >= lower) & (m['strike'] <= upper)]
-            m = m[(m['openInterest_call'] + m['openInterest_put']) > 0]
+            if show_debug:
+                st.write(f"Efter strike-filter: {len(m)} (interval: {lower:.2f}-{upper:.2f})")
+
             m = m[np.isfinite(m['iv_final'])]
             m = m[m['iv_final'] < 1.0]
+            if show_debug:
+                st.write(f"Efter IV-filter: {len(m)}")
 
             if not m.empty:
                 tmp = pd.DataFrame({
@@ -110,21 +124,25 @@ def build_vol_surface_df(ticker, spot, expiries):
                 })
                 rows.append(tmp)
 
-        except Exception:
+        except Exception as e:
+            if show_debug:
+                st.write(f"⚠️ Skipped {expiry}: {e}")
             continue
 
     if rows:
-        return pd.concat(rows, ignore_index=True)
-    return pd.DataFrame()
-
+        timestamp = dt.datetime.now()
+        return pd.concat(rows, ignore_index=True), timestamp
+    return pd.DataFrame(), dt.datetime.now()
 
 # ========== KURSDATA ==========
 if ticker:
     period = st.selectbox("Vælg periode", ["1d", "5d", "1mo", "6mo", "1y", "5y", "max"], index=4)
-    data = get_stock_data(ticker, period)
+    data, data_timestamp = get_stock_data(ticker, period)
 
     if not data.empty:
         st.subheader(f"Aktiekurs for {ticker}")
+        st.caption(f"Senest hentet: {data_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+
         data["SMA50"] = data["Close"].rolling(50).mean()
         data["SMA200"] = data["Close"].rolling(200).mean()
 
@@ -158,22 +176,26 @@ if ticker:
         if st.checkbox("Vis rådata"):
             st.dataframe(data.tail())
 
-
 # ========== VOLATILITY SURFACE ==========
 st.markdown("---")
 st.subheader("📈 Volatility Surface")
 show_surface = st.checkbox("Beregn og vis volatility surface", value=False)
 
-if show_surface:
-    spot, expiries = get_spot_and_expiries(ticker)
+if show_surface and ticker:
+    spot, expiries, spot_timestamp = get_spot_and_expiries(ticker)
+    st.caption(f"Spot og expiries hentet: {spot_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Mulighed for at tvinge genberegning (ignorer cache)
+    # ✅ Ny checkbox til debug
+    show_debug = st.checkbox("🔧 Vis debug-info", value=False)
+
     force_refresh = st.button("🔄 Opdater vol surface-data")
     if force_refresh:
-        st.cache_data.clear()  # Tømmer al cache
+        st.cache_data.clear()
 
     with st.spinner("⏳ Beregner volatility surface..."):
-        df = build_vol_surface_df(ticker, spot, expiries)
+        df, df_timestamp = build_vol_surface_df(ticker, spot, expiries, show_debug=show_debug)
+
+    st.caption(f"Volatility surface data hentet: {df_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
 
     if df.empty:
         st.warning("Kunne ikke beregne volatility surface (for lidt data).")
@@ -228,4 +250,3 @@ if show_surface:
                 height=700
             )
             st.plotly_chart(fig2d, use_container_width=True)
-
