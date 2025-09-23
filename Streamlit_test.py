@@ -64,7 +64,7 @@ def get_spot_and_expiries(ticker):
     return spot, expiries, timestamp
 
 @st.cache_data(ttl=300)
-def build_vol_surface_df(ticker, spot, expiries, show_debug=False):
+def build_vol_surface_df(ticker, spot, expiries, n_sigma=3, show_debug=False):
     rows = []
     ticker_obj = yf.Ticker(ticker)
     for expiry in expiries:
@@ -84,12 +84,10 @@ def build_vol_surface_df(ticker, spot, expiries, show_debug=False):
                 on='strike', how='inner', suffixes=('_call', '_put')
             )
 
-            if show_debug:
-                st.write(f"📅 {expiry}: Rækker før filter: {len(m)}")
-
             if m.empty:
                 continue
 
+            # Find ATM strike & lav endelig IV kolonne
             atm_strike = m.loc[(m['strike'] - spot).abs().idxmin(), 'strike']
             m['iv_final'] = np.nan
             m.loc[m['strike'] < spot, 'iv_final'] = m.loc[m['strike'] < spot, 'impliedVolatility_put']
@@ -98,27 +96,19 @@ def build_vol_surface_df(ticker, spot, expiries, show_debug=False):
                 m['strike'] == atm_strike, ['impliedVolatility_call', 'impliedVolatility_put']
             ].mean(axis=1)
 
+            # Beregn lognormal sigma og filtrer strikes på +/- n_sigma
             atm_iv = m.loc[m['strike'] == atm_strike, 'iv_final'].iloc[0]
-            sigma_exp = atm_iv * np.sqrt(T)
+            log_std = atm_iv * np.sqrt(T)
+            m['log_moneyness'] = np.log(m['strike'] / spot)
+            m = m[(m['log_moneyness'] >= -n_sigma * log_std) & (m['log_moneyness'] <= n_sigma * log_std)]
 
-            lower = spot * (1 - 3 * sigma_exp)
-            upper = spot * (1 + 3 * sigma_exp)
-            if (upper - lower) < 0.2 * spot:
-                lower = spot * 0.8
-                upper = spot * 1.2
-
-            m = m[(m['strike'] >= lower) & (m['strike'] <= upper)]
-            if show_debug:
-                st.write(f"Efter strike-filter: {len(m)} (interval: {lower:.2f}-{upper:.2f})")
-
+            # Fjern NaN og ekstreme IV værdier
             m = m[np.isfinite(m['iv_final'])]
             m = m[m['iv_final'] < 1.0]
-            if show_debug:
-                st.write(f"Efter IV-filter: {len(m)}")
 
             if not m.empty:
                 tmp = pd.DataFrame({
-                    'x': np.log(m['strike'] / spot),
+                    'x': m['log_moneyness'],
                     'T': T,
                     'iv': m['iv_final'].values
                 })
@@ -185,6 +175,9 @@ if show_surface and ticker:
     spot, expiries, spot_timestamp = get_spot_and_expiries(ticker)
     st.caption(f"Spot og expiries hentet: {spot_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # ✅ Slider til hvor bredt strike-interval du vil se
+    n_sigma = st.slider("Vælg antal standardafvigelser omkring spot", min_value=1.0, max_value=4.0, value=3.0, step=0.5)
+
     # ✅ Ny checkbox til debug
     show_debug = st.checkbox("🔧 Vis debug-info", value=False)
 
@@ -193,7 +186,7 @@ if show_surface and ticker:
         st.cache_data.clear()
 
     with st.spinner("⏳ Beregner volatility surface..."):
-        df, df_timestamp = build_vol_surface_df(ticker, spot, expiries, show_debug=show_debug)
+        df, df_timestamp = build_vol_surface_df(ticker, spot, expiries, n_sigma=n_sigma, show_debug=show_debug)
 
     st.caption(f"Volatility surface data hentet: {df_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
 
